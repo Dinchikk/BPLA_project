@@ -1,0 +1,306 @@
+import java.awt.Graphics;
+import java.awt.GridLayout;
+import java.awt.Image;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+
+import javax.swing.JFrame;
+import javax.swing.JPanel;
+
+import org.opencv.highgui.VideoCapture;
+import org.opencv.imgproc.Imgproc;
+import org.opencv.core.Core;
+import org.opencv.core.CvType;
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfFloat;
+import org.opencv.core.MatOfInt;
+import org.opencv.core.MatOfPoint;
+import org.opencv.core.Point;
+import org.opencv.core.Scalar;
+import org.opencv.core.Size;
+
+public class Test_znak extends JFrame 
+{
+	private static int			 W = 640;
+	private static int			 H = 480;
+	private static JPanel		 c1 = new JPanel();
+	private static JPanel 		 c2 = new JPanel();
+	private static BufferedImage i1;
+	private static BufferedImage i2;
+	
+	private static int           mHistSizeNum = 10;
+    private static Mat           mMat0;
+    private static MatOfInt      mChannels;
+    private static MatOfInt      mHistSize;
+    private static MatOfFloat    mRanges;
+    private static Mat           hist_znak;
+        
+    private static Mat			 rgba;
+    private static Mat			 mIntermediateMat;
+    private static Mat			 grayMat;
+
+    private float				 stab_ang_a=0;
+    private float				 stab_ang_b=0;
+    private static float		 len_to_znak=0;
+    private static Point		 coord_znak;
+    final static float			 K_LPF = 0.1f;
+    
+    private static boolean		 toExit = false;
+
+	
+	public static void main( String[] args )
+	{
+		Test_znak idt = new Test_znak();
+		i1 = new BufferedImage(640,480,BufferedImage.TYPE_INT_RGB);
+		i2 = new BufferedImage(640,480,BufferedImage.TYPE_INT_RGB);
+		idt.start();
+        
+		System.loadLibrary( Core.NATIVE_LIBRARY_NAME );
+
+		VideoCapture cap = new VideoCapture();
+		cap.open(1);
+		boolean bool = cap.isOpened();
+		System.out.println(bool);
+		try {
+			Thread.sleep(1000);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		}
+		if (bool){
+			rgba = new Mat();
+			grayMat = new Mat();
+			mIntermediateMat = new Mat();
+			mMat0 = new Mat();
+	        mChannels = new MatOfInt(0);
+	        mHistSize = new MatOfInt(mHistSizeNum);
+	        mRanges = new MatOfFloat(0f, 256f);
+	        hist_znak = new Mat(10,1,CvType.CV_32FC1);
+	        hist_znak.put(0, 0, new float[] {12, 25, 8, 3, 0, 0, 12, 50, 110, 80} );
+	        coord_znak = new Point(0, 0);
+	        
+	        
+			while(!toExit){
+				if (cap.grab()){
+					cap.retrieve(rgba);
+
+					Imgproc.cvtColor(rgba,grayMat,Imgproc.COLOR_RGB2GRAY);
+					Core.normalize(grayMat, grayMat, 255, 0, Core.NORM_INF);
+			    	
+					Imgproc.GaussianBlur(grayMat, grayMat, new Size(5,5), 3);
+			    	Imgproc.Canny(grayMat, mIntermediateMat, 80, 90);
+			    	
+			    	find_contour();
+
+					i1 = MattoBufferedImage(rgba);
+					i2 = MattoBufferedImage(mIntermediateMat);
+					
+					idt.repaint();
+				}
+			}
+		}
+
+		cap.release();
+		idt.setVisible(false);
+		;
+	}
+	
+	private void start() { 
+        setLayout(new GridLayout(1, 2)); 
+        setSize(W * 2 + 10, H + 35);
+        c1.setSize(W, H);
+        c2.setSize(W, H);
+        add(c1);
+        add(c2);
+        setTitle("“естирование системы поиска посадочного знака");
+        setVisible(true);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        addKeyListener(new KeyListener(){
+
+        	@Override
+			public void keyPressed(KeyEvent e) {
+				toExit = true;				
+			}
+			
+        	@Override
+			public void keyReleased(KeyEvent e) {}
+			@Override
+			public void keyTyped(KeyEvent e) {}
+        });
+	}
+
+	@Override
+    public void paint(Graphics g) {//redraw frame
+        c1.getGraphics().drawImage(i1, 0, 0, this);
+        c2.getGraphics().drawImage(i2, 0, 0, this);
+	}
+	
+	public static BufferedImage MattoBufferedImage(Mat m){
+	      int type = BufferedImage.TYPE_BYTE_GRAY;
+	      if ( m.channels() > 1 ) 
+	          type = BufferedImage.TYPE_3BYTE_BGR;
+	      int bufferSize = m.channels()*m.cols()*m.rows();
+	      byte [] b = new byte[bufferSize];
+	      m.get(0,0,b); // get all the pixels
+	      BufferedImage image = new BufferedImage(m.cols(),m.rows(), type);
+	      final byte[] targetPixels = ((DataBufferByte) image.getRaster().getDataBuffer()).getData();
+	      System.arraycopy(b, 0, targetPixels, 0, b.length);  
+	      return image;
+	  }
+
+	static void find_contour() {
+		Mat mHierarchy = new Mat();
+		Mat mDilatedMask = new Mat();
+		Scalar CONTOUR_COLOR = new Scalar(0,255,0,255); 
+		List<MatOfPoint> contours = new ArrayList<MatOfPoint>();
+		List<MatOfPoint> big_contours = new ArrayList<MatOfPoint>();
+		Mat hist = new Mat();
+		float[] mBuff = new float[mHistSizeNum];
+		int thikness = 5;
+		Point mP1 = new Point();
+		Point mP2 = new Point();
+		
+		int [][]find_rect = new int[100][5];
+		int rect_index = 0;
+		
+		Imgproc.dilate(mIntermediateMat, mDilatedMask, new Mat());
+		Imgproc.findContours(mDilatedMask, contours, mHierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE); 
+//        Imgproc.drawContours(rgba, contours, -1, CONTOUR_COLOR);
+        
+        Iterator<MatOfPoint> each = contours.iterator();
+        while (each.hasNext()) {
+            MatOfPoint contour = each.next();
+            double area = Imgproc.contourArea(contour);
+            if (area > 1500){
+            	// find rectangle of contour
+            	Point[] pa = contour.toArray();
+                Point tl = new Point(pa[0].x,pa[0].y);
+                Point br = new Point(pa[0].x,pa[0].y);
+
+                for (int i = 1; i < pa.length; i++){
+                    if (pa[i].x > br.x) br.x = pa[i].x;
+                    if (pa[i].x < tl.x) tl.x = pa[i].x;
+                    if (pa[i].y > br.y) br.y = pa[i].y;
+                    if (pa[i].y < tl.y) tl.y = pa[i].y;
+                }
+                int top = (int) (br.x - tl.x);
+                int left = (int) (br.y - tl.y);
+                if ((3*top < left) ||(3*left < top)) continue;
+
+//                Core.rectangle(rgba, tl, br, CONTOUR_COLOR);
+                Mat contMat = grayMat.submat((int)tl.y, (int)br.y, (int)tl.x, (int)br.x);
+            	Imgproc.calcHist(Arrays.asList(contMat), mChannels, mMat0, hist, mHistSize, mRanges);
+
+            	hist.get(0, 0, mBuff);
+                float summ = 0;
+                float max = 0;
+                for(float i: mBuff){
+                	summ += i;
+                	if (i > max) max = i;
+                }
+            	Core.normalize(hist, hist, max * 300 / summ, 0, Core.NORM_INF);
+                double comp = Imgproc.compareHist(hist_znak, hist, Imgproc.CV_COMP_CHISQR);
+            	if (comp < 500){
+            		find_rect[rect_index][0] = (int) tl.x;
+            		find_rect[rect_index][1] = (int) tl.y;
+            		find_rect[rect_index][2] = (int) br.x;
+            		find_rect[rect_index][3] = (int) br.y;
+            		find_rect[rect_index][4] = (int) comp;
+            		
+            		if (find_lines(mIntermediateMat.submat((int)tl.y, (int)br.y, (int)tl.x, (int)br.x), tl)){
+            			System.out.println("Contour: " + tl + " " + br + " " + comp);
+            			rect_index++;
+            		
+            			hist.get(0, 0, mBuff);//draw Hist
+            			for(int h=0; h < mHistSizeNum; h++) {
+            				mP1.x = mP2.x = 100 + (h) * thikness;
+            				mP1.y = 450;
+            				mP2.y = mP1.y - 2 - (int)mBuff[h];
+            				Core.line(rgba, mP1, mP2, Scalar.all(255), thikness);
+            			}
+            			break;
+            		}
+            	}
+            }
+        }
+        if (rect_index > 0){
+        	coord_znak.x = (1-K_LPF) * coord_znak.x + K_LPF * (find_rect[0][0] + find_rect[0][2]) / 2 - 320; // LPF
+        	coord_znak.y = (1-K_LPF) * coord_znak.y + K_LPF * (find_rect[0][1] + find_rect[0][3]) / 2 - 240; 
+        	Core.rectangle(rgba, new Point(find_rect[0][0],find_rect[0][1]), new Point(find_rect[0][2],find_rect[0][3]), CONTOUR_COLOR);
+        }else{
+        	coord_znak.x = 0;
+        	coord_znak.y = 0;
+        }
+        
+        hist_znak.get(0, 0, mBuff);
+        for(int h=0; h<mHistSizeNum; h++) {
+            mP1.x = mP2.x = 100 + (h + 50) * thikness;
+            mP1.y = 450;
+            mP2.y = mP1.y - 2 - (int)mBuff[h];
+            Core.line(rgba, mP1, mP2, Scalar.all(255), thikness);
+        }
+ 
+	}
+	
+	private static boolean find_lines(Mat innerMat, Point top_left) {
+		Mat p_lines = new Mat(); 
+		double[] data;
+		int thikness = 1;
+		double[][] lines; // 0-3 begin-end, 4-A, 5-B, 6- angle 
+		boolean [] line_bool;
+		int lines_num;
+		Point intersec = new Point();
+		double dif_angle = 10 * Math.PI / 180;
+		double dif_dist = 10.0d;
+		
+		Imgproc.HoughLinesP(innerMat, p_lines, 1, Math.PI/180, 50,30,20);
+		lines_num = p_lines.cols();		
+		lines = new double [lines_num][7];
+		line_bool = new boolean[lines_num];
+		for(int i = 0; i < lines_num; i++){
+	        data = p_lines.get(0, i);
+	        lines[i][0] = data[0] + top_left.x;
+	        lines[i][1] = data[1] + top_left.y;
+	        lines[i][2] = data[2] + top_left.x;
+	        lines[i][3] = data[3] + top_left.y;
+	        if (lines[i][2] == lines[i][0]) lines[i][0]++;
+	        lines[i][4] = (lines[i][3] - lines[i][1]) / (lines[i][2] - lines[i][0]);
+	        lines[i][5] = lines[i][1] - lines[i][4] * lines[i][0];
+	        lines[i][6] = Math.atan(lines[i][4]);
+	        line_bool[i] = true;
+	    }
+		for(int i = 0; i < lines_num; i++){
+			if (!line_bool[i]) continue;
+			int j;
+			for(j = i + 1; j < lines_num; j++){
+				if (line_bool[j]){
+					if ((Math.abs(lines[i][6] - lines[j][6]) < dif_angle)&&(Math.abs(Math.cos(lines[i][6]) * (lines[i][5] - lines[j][5])) < dif_dist)) 
+						line_bool[j] = false;
+					else if ((Math.abs(lines[i][6] - lines[j][6]) < dif_angle + Math.PI / 2) && (Math.abs(lines[i][6] - lines[j][6]) > Math.PI / 2 - dif_angle)) {
+						intersec.x = (lines[i][5] - lines[j][5]) / (lines[j][4] - lines[i][4]);
+						intersec.y = intersec.x * lines[i][4] + lines[i][5]; 
+						if (((lines[i][0] - intersec.x) * (lines[i][2] - intersec.x) <= 0) && ((lines[j][0] - intersec.x) * (lines[j][2] - intersec.x) <= 0))
+						  if ((Math.abs((lines[i][0] + lines[i][2]) / 2 - intersec.x) < (Math.abs(lines[i][0] - lines[i][2]) / 4)) &&
+						      (Math.abs((lines[j][0] + lines[j][2]) / 2 - intersec.x) < (Math.abs(lines[j][0] - lines[j][2]) / 4)))
+						  {
+							Core.line(rgba, new Point((int)lines[i][0],(int)lines[i][1]), new Point((int)lines[i][2],(int)lines[i][3]), new Scalar(0,0,255,255), thikness);
+							Core.line(rgba, new Point((int)lines[j][0],(int)lines[j][1]), new Point((int)lines[j][2],(int)lines[j][3]), new Scalar(0,0,255,255), thikness);
+							Core.circle(rgba, intersec, 5, new Scalar(0,0,255,255));
+							break;
+						  }
+					}
+				}
+			}
+			if (j < lines_num) return true;
+		}
+		return false;
+	}
+
+}
